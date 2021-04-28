@@ -41,7 +41,9 @@ from parlai.utils.torch import (
     trainable_parameters,
     PipelineHelper,
 )
-
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARN)
 
 class SearchBlocklist(object):
     """
@@ -1357,7 +1359,11 @@ class TreeSearch(object):
                         logprobs[beam_id][ngram[-1]] = neginf(logprobs.dtype)
         return logprobs
 
-    def advance(self, logprobs):
+        
+    def max_check(self, var, step, message):
+        logger.debug(message + f", decoding step #{step}")    
+
+    def advance(self, logprobs, in_prefix_mode=False):
         """
         Advance the beam one step.
         """
@@ -1366,6 +1372,7 @@ class TreeSearch(object):
             # penalize all eos probs to make it decode longer
             for hyp_id in range(logprobs.size(0)):
                 logprobs[hyp_id][self.eos] = neginf(logprobs.dtype)
+        self.max_check(logprobs, current_length, f"Max score after EOS penalization is {logprobs.max(dim=-1)}")
 
         if self.scores is None:
             self.scores = torch.zeros(1).type_as(logprobs).to(logprobs.device)
@@ -1376,20 +1383,22 @@ class TreeSearch(object):
             if token == self.eos:
                 self.scores[hyp_id] = neginf(self.scores.dtype)
 
-        # beam blocking
-        if self.block_ngram > 0:
-            logprobs = self._block_ngrams(self.block_ngram, logprobs, None)
+        if not in_prefix_mode: # only block if we're not using prefixes -- otherwise risks running into a situation where 0 tokens are decodable
+            # beam blocking
+            if self.block_ngram > 0:
+                logprobs = self._block_ngrams(self.block_ngram, logprobs, None)
 
-        logprobs = self._block_block_list(logprobs)
+            logprobs = self._block_block_list(logprobs)
 
-        if self.context_block_ngram > 0:
-            if self.context is None:
-                raise ValueError(
-                    "Must use TreeSearch.set_context to use context blocking."
+            if self.context_block_ngram > 0:
+                if self.context is None:
+                    raise ValueError(
+                        "Must use TreeSearch.set_context to use context blocking."
+                    )
+                logprobs = self._block_ngrams(
+                    self.context_block_ngram, logprobs, self.context
                 )
-            logprobs = self._block_ngrams(
-                self.context_block_ngram, logprobs, self.context
-            )
+                self.max_check(logprobs, current_length, f"Max score after full-context NGram block is {logprobs.max(dim=-1)}")
 
         hyp_ids, tok_ids, self.scores = self.select_paths(
             logprobs, self.scores, current_length
